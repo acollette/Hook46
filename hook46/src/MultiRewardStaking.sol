@@ -110,16 +110,25 @@ contract MultiRewardStaking is ReentrancyGuard, Context, Ownable {
     //////////////////////////////////////////////////////////////*/
 
     struct Reward {
-        uint256 rewardsDuration;        /// @dev How long rewards take to vest.
-        uint256 periodFinish;           /// @dev When current rewards will finish vesting.
-        uint256 rewardRate;             /// @dev Rewards emitted per second.
-        uint256 lastUpdateTime;         /// @dev Last time this data struct was updated.
-        uint256 rewardPerTokenStored;   /// @dev Last snapshot of rewardPerToken taken.
+        uint256 rewardsDuration;
+        /// @dev How long rewards take to vest.
+        uint256 periodFinish;
+        /// @dev When current rewards will finish vesting.
+        uint256 rewardRate;
+        /// @dev Rewards emitted per second.
+        uint256 lastUpdateTime;
+        /// @dev Last time this data struct was updated.
+        uint256 rewardPerTokenStored;
     }
+    /// @dev Last snapshot of rewardPerToken taken.
 
-    address[] public rewardTokens;      /// @dev Array of ERC20 tokens distributed as rewards (if present).
+    address[] public rewardTokens;
 
-    uint256 private _totalSupply;       /// @dev Total supply of (non-transferrable) LP tokens for reards contract.
+    /// @dev Array of ERC20 tokens distributed as rewards (if present).
+
+    uint256 private _totalSupply;
+
+    /// @dev Total supply of (non-transferrable) LP tokens for reards contract.
 
     /// @dev Contains rewards information for each rewardToken.
     mapping(address => Reward) public rewardData;
@@ -130,10 +139,12 @@ contract MultiRewardStaking is ReentrancyGuard, Context, Ownable {
     /// @dev The order is account -> rewardAsset -> amount.
     mapping(address => mapping(address => uint256)) public rewards;
 
-     /// @dev Contains LP token balance of each account (is 1:1 ratio with amount deposited).
+    /// @dev Contains LP token balance of each account (is 1:1 ratio with amount deposited).
     mapping(address => uint256) private _balances;
 
-    IERC20 public stakingToken;         /// @dev IERC20 wrapper for the stakingToken (deposited to receive LP tokens).
+    IERC20 public stakingToken;
+
+    /// @dev IERC20 wrapper for the stakingToken (deposited to receive LP tokens).
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
@@ -181,7 +192,6 @@ contract MultiRewardStaking is ReentrancyGuard, Context, Ownable {
     /// @param  amount The amount of "stakingToken" withdrawn.
     event Withdrawn(address indexed account, uint256 amount);
 
-
     /*//////////////////////////////////////////////////////////////
                              MODIFIERS
     //////////////////////////////////////////////////////////////*/
@@ -208,8 +218,10 @@ contract MultiRewardStaking is ReentrancyGuard, Context, Ownable {
     /// @notice Returns the amount of tokens owned by "account", received when depositing via stake().
     /// @param account The account to view information of.
     /// @return amount The amount of tokens owned by "account".
-    function balanceOf(address account) external view returns (uint256 amount) { return _balances[account]; }
-    
+    function balanceOf(address account) external view returns (uint256 amount) {
+        return _balances[account];
+    }
+
     /// @notice Returns the total amount of rewards being distributed to everyone for current rewardsDuration.
     /// @param  _rewardsToken The asset that's being distributed.
     /// @return amount The amount of rewards being distributed.
@@ -219,15 +231,19 @@ contract MultiRewardStaking is ReentrancyGuard, Context, Ownable {
 
     /// @notice Returns the amount of tokens in existence; these are minted and burned when depositing or withdrawing.
     /// @return amount The amount of tokens in existence.
-    function totalSupply() external view returns (uint256 amount) { return _totalSupply; }
+    function totalSupply() external view returns (uint256 amount) {
+        return _totalSupply;
+    }
 
     /// @notice Returns the last snapshot of rewardPerTokenStored taken for a reward asset.
     /// @param account The account to view information of.
     /// @param rewardAsset The reward token for which we want to return the rewardPerTokenstored.
     /// @return amount The latest up-to-date value of rewardPerTokenStored.
-    function viewAccountRewardPerTokenPaid(
-        address account, address rewardAsset
-    ) external view returns (uint256 amount) {
+    function viewAccountRewardPerTokenPaid(address account, address rewardAsset)
+        external
+        view
+        returns (uint256 amount)
+    {
         return accountRewardPerTokenPaid[account][rewardAsset];
     }
 
@@ -260,11 +276,11 @@ contract MultiRewardStaking is ReentrancyGuard, Context, Ownable {
     /// @param _rewardsToken The asset that's being distributed.
     /// @return amount The cumulative amount of rewards distributed per LP token.
     function rewardPerToken(address _rewardsToken) public view returns (uint256 amount) {
-        if (_totalSupply == 0) { return rewardData[_rewardsToken].rewardPerTokenStored; }
+        if (_totalSupply == 0) return rewardData[_rewardsToken].rewardPerTokenStored;
         return rewardData[_rewardsToken].rewardPerTokenStored.add(
-            lastTimeRewardApplicable(_rewardsToken).sub(
-                rewardData[_rewardsToken].lastUpdateTime
-            ).mul(rewardData[_rewardsToken].rewardRate).mul(1e18).div(_totalSupply)
+            lastTimeRewardApplicable(_rewardsToken).sub(rewardData[_rewardsToken].lastUpdateTime).mul(
+                rewardData[_rewardsToken].rewardRate
+            ).mul(1e18).div(_totalSupply)
         );
     }
 
@@ -274,8 +290,7 @@ contract MultiRewardStaking is ReentrancyGuard, Context, Ownable {
     function addReward(address _rewardsToken, uint256 _rewardsDuration) external onlyOwner {
         require(_rewardsDuration > 0, "_rewardsDuration == 0");
         require(
-            rewardData[_rewardsToken].rewardsDuration == 0, 
-            "addReward() rewardData[_rewardsToken].rewardsDuration != 0"
+            rewardData[_rewardsToken].rewardsDuration == 0, "addReward() rewardData[_rewardsToken].rewardsDuration != 0"
         );
         require(rewardTokens.length < 10, "rewardTokens.length >= 10");
 
@@ -334,12 +349,14 @@ contract MultiRewardStaking is ReentrancyGuard, Context, Ownable {
         stakingToken.safeTransferFrom(_msgSender(), address(this), amount);
         emit StakedFor(account, amount, _msgSender());
     }
-    
+
     /// @notice Claim rewards for all possible _rewardTokens.
     function getRewards() public updateReward(_msgSender()) {
-        for (uint256 i = 0; i < rewardTokens.length; i++) { _getRewardAt(i); }
+        for (uint256 i = 0; i < rewardTokens.length; i++) {
+            _getRewardAt(i);
+        }
     }
-    
+
     /// @notice Claim rewards for a specific _rewardToken.
     /// @param index The index to claim, corresponds to a given index of rewardToken[].
     function _getRewardAt(uint256 index) internal nonReentrant {
@@ -362,5 +379,4 @@ contract MultiRewardStaking is ReentrancyGuard, Context, Ownable {
         stakingToken.safeTransfer(_msgSender(), amount);
         emit Withdrawn(_msgSender(), amount);
     }
-
 }

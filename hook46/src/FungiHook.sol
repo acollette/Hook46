@@ -12,6 +12,7 @@ import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 
 import {Hooks} from "v4-core/libraries/Hooks.sol";
 
+import {LPToken} from "./LPToken.sol";
 import {MultiRewardStaking} from "./MultiRewardStaking.sol";
 import {Vault} from "./Vault.sol";
 
@@ -42,11 +43,12 @@ contract FungiHook is BaseHook {
         int24 initialTick;
         bool narrowAcitve;
         bool largeActive;
-        ERC20 lpNarrow;
-        ERC20 lpLarge;
+        LPToken lpNarrow;
+        LPToken lpLarge;
         Vault vaultToken0;
         Vault vaultToken1;
-        MultiRewardStaking multiReward;        
+        MultiRewardStaking multiRewardNarrow;
+        MultiRewardStaking multiRewardLarge;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -89,20 +91,39 @@ contract FungiHook is BaseHook {
         override
         poolManagerOnly
         returns (bytes4)
-    {   
-        // cache poolId
+    {
+        // cache values
         PoolId poolId = key.toId();
-        // Map the current tick 1:1 (assuming first deposit is at stable price)
+        address token0 = Currency.unwrap(key.currency0);
+        address token1 = Currency.unwrap(key.currency1);
+
+        // Map the current tick 1:1 (assuming initialization is done stable price)
         poolInfo[poolId].initialTick = tick;
 
         // Deploy ERC20 LP tokens and map it to pool
-        poolInfo[poolId].lpNarrow = new ERC20("narrow", "nrw", 18);
-
+        address narrowLPToken = address(new LPToken("narrow", "nrw", 18));
+        address largeLPToken = address(new LPToken("narrow", "nrw", 18));
+        poolInfo[poolId].lpNarrow = LPToken(narrowLPToken);
+        poolInfo[poolId].lpLarge = LPToken(largeLPToken);
 
         // Deploy MultiReward contract
+        {
+            MultiRewardStaking multiRewardNarrow = new MultiRewardStaking(narrowLPToken);
+            MultiRewardStaking multiRewardLarge = new MultiRewardStaking(largeLPToken);
+            poolInfo[poolId].multiRewardNarrow = multiRewardNarrow;
+            poolInfo[poolId].multiRewardNarrow = multiRewardLarge;
+
+            // add reward tokens
+            multiRewardNarrow.addReward(token0, 1);
+            multiRewardNarrow.addReward(token1, 1);
+
+            multiRewardLarge.addReward(token0, 1);
+            multiRewardLarge.addReward(token1, 1);
+        }
 
         // Deploy Vaults
-
+        poolInfo[poolId].vaultToken0 = new Vault(ERC20(token0), "Fungi-0", "FUN0");
+        poolInfo[poolId].vaultToken0 = new Vault(ERC20(token1), "Fungi-1", "FUN1");
 
         return this.afterInitialize.selector;
     }
@@ -114,13 +135,12 @@ contract FungiHook is BaseHook {
         BalanceDelta swapDelta,
         bytes calldata hookData
     ) external override poolManagerOnly returns (bytes4, int128) {
-        // Check if needs to invest out of range liquidity 
+        // Check if needs to invest out of range liquidity
         return (this.afterSwap.selector, 0);
     }
 
     function addLiquidity(bool large, uint256 amountDesired0, uint256 amountDesired1, PoolId poolId) external {
         // calculate ratios
-
 
         // Swap one for the other
 

@@ -40,11 +40,9 @@ contract Vault is ERC4626, Owned {
 
     // deposit and withdraw functions to reimplement
 
-
     function mint(uint256, address) public pure override returns (uint256) {
         revert NotImplemented();
     }
-
 
     function redeem(uint256, address, address) public pure override returns (uint256) {
         revert NotImplemented();
