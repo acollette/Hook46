@@ -57,6 +57,8 @@ contract FungiHook is BaseHook {
 
     struct RangeInfo {
         bool active;
+        int24 tickLower;
+        int24 tickUpper;
         uint128 totalLiquidity;
         uint160 sqrtPriceX96Lower;
         uint160 sqrtPriceX96Upper;
@@ -68,7 +70,7 @@ contract FungiHook is BaseHook {
     //////////////////////////////////////////////////////////////*/
 
     // Initialize BaseHook
-    constructor(IPoolManager manager_, uint256 narrowRangeMultiple_, uint256 largeRangeMultiple_) BaseHook(manager_) {
+    constructor(IPoolManager manager_, int24 narrowRangeMultiple_, int24 largeRangeMultiple_) BaseHook(manager_) {
         narrowRangeMultiple = narrowRangeMultiple_;
         largeRangeMultiple = largeRangeMultiple_;
     }
@@ -191,14 +193,17 @@ contract FungiHook is BaseHook {
             rangeInfo_.lpToken.mint(msg.sender, lpToMint);
         }
 
+        // Increase total liquidity for specific range
+        rangeInfo[poolId][narrow].totalLiquidity += liquidity;
+
         // Add liquidity in pool for hook
-        IPoolManager.ModifyLiquidityParams memory modifyLiquidityParams = IPoolManager.ModifyLiquidityParams({
+        IPoolManager.ModifyLiquidityParams memory params = IPoolManager.ModifyLiquidityParams({
             tickLower: rangeInfo_.tickLower,
             tickUpper: rangeInfo_.tickUpper,
-            liquidityDelta: int256(liquidity),
+            liquidityDelta: int256(int128(liquidity)),
             salt: 0
         });
-
-        poolManager.modifyLiquidity(poolInfo[poolId].poolKey, params, hookData);
+        
+        poolManager.modifyLiquidity(poolInfo[poolId].poolKey, params, "");
     }
 }
