@@ -2,6 +2,7 @@
 pragma solidity ^0.8.0;
 
 import {BaseHook} from "v4-periphery/BaseHook.sol";
+import {LiquidityAmounts} from "v4-periphery/libraries/LiquidityAmounts.sol";
 
 import {CurrencyLibrary, Currency} from "v4-core/types/Currency.sol";
 import {BalanceDeltaLibrary, BalanceDelta} from "v4-core/types/BalanceDelta.sol";
@@ -11,6 +12,8 @@ import {PoolId, PoolIdLibrary} from "v4-core/types/PoolId.sol";
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 
 import {Hooks} from "v4-core/libraries/Hooks.sol";
+import {StateLibrary} from "v4-core/libraries/StateLibrary.sol";
+import {TickMath} from "v4-core/libraries/TickMath.sol";
 
 import {LPToken} from "./LPToken.sol";
 import {MultiRewardStaking} from "./MultiRewardStaking.sol";
@@ -25,30 +28,39 @@ contract FungiHook is BaseHook {
     using CurrencyLibrary for Currency;
     using BalanceDeltaLibrary for BalanceDelta;
     using PoolIdLibrary for PoolKey;
+    using StateLibrary for IPoolManager;
 
     /*//////////////////////////////////////////////////////////////
                               CONSTANTS
     //////////////////////////////////////////////////////////////*/
 
-    uint256 public immutable narrowRange;
-    uint256 public immutable largeRange;
+    // The multiplier for the tick spacing defining the narrow range.
+    int24 public immutable narrowRangeMultiple;
+    // The multiplier for the tick spacing defining the large range.
+    int24 public immutable largeRangeMultiple;
 
     /*//////////////////////////////////////////////////////////////
                               STORAGE
     //////////////////////////////////////////////////////////////*/
 
     mapping(PoolId poolId => PoolInfo) public poolInfo;
+    mapping(PoolId poolId => mapping(bool narrow => RangeInfo)) public rangeInfo;
 
     struct PoolInfo {
         int24 initialTick;
-        bool narrowAcitve;
-        bool largeActive;
-        LPToken lpNarrow;
-        LPToken lpLarge;
+        PoolKey poolKey;
         Vault vaultToken0;
         Vault vaultToken1;
         MultiRewardStaking multiRewardNarrow;
         MultiRewardStaking multiRewardLarge;
+    }
+
+    struct RangeInfo {
+        bool active;
+        uint128 totalLiquidity;
+        uint160 sqrtPriceX96Lower;
+        uint160 sqrtPriceX96Upper;
+        LPToken lpToken;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -56,9 +68,9 @@ contract FungiHook is BaseHook {
     //////////////////////////////////////////////////////////////*/
 
     // Initialize BaseHook
-    constructor(IPoolManager _manager, uint256 narrowRange_, uint256 largeRange_) BaseHook(_manager) {
-        narrowRange = narrowRange_;
-        largeRange = largeRange_;
+    constructor(IPoolManager manager_, uint256 narrowRangeMultiple_, uint256 largeRangeMultiple_) BaseHook(manager_) {
+        narrowRangeMultiple = narrowRangeMultiple_;
+        largeRangeMultiple = largeRangeMultiple_;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -100,11 +112,14 @@ contract FungiHook is BaseHook {
         // Map the current tick 1:1 (assuming initialization is done stable price)
         poolInfo[poolId].initialTick = tick;
 
+        // Store poolKey
+        poolInfo[poolId].poolKey = key;
+
         // Deploy ERC20 LP tokens and map it to pool
         address narrowLPToken = address(new LPToken("narrow", "nrw", 18));
         address largeLPToken = address(new LPToken("narrow", "nrw", 18));
-        poolInfo[poolId].lpNarrow = LPToken(narrowLPToken);
-        poolInfo[poolId].lpLarge = LPToken(largeLPToken);
+        rangeInfo[poolId][true].lpToken = LPToken(narrowLPToken);
+        rangeInfo[poolId][false].lpToken = LPToken(largeLPToken);
 
         // Deploy MultiReward contract
         {
@@ -125,6 +140,22 @@ contract FungiHook is BaseHook {
         poolInfo[poolId].vaultToken0 = new Vault(ERC20(token0), "Fungi-0", "FUN0");
         poolInfo[poolId].vaultToken0 = new Vault(ERC20(token1), "Fungi-1", "FUN1");
 
+        // Add sqrtPrices for tick ranges
+        {
+            int24 halfNarrowTickRange = narrowRangeMultiple * key.tickSpacing / 2;
+            int24 halfLargeTickRange = largeRangeMultiple * key.tickSpacing / 2;
+
+            rangeInfo[poolId][true].sqrtPriceX96Lower = TickMath.getSqrtPriceAtTick(tick - halfNarrowTickRange);
+            rangeInfo[poolId][true].sqrtPriceX96Upper = TickMath.getSqrtPriceAtTick(tick + halfNarrowTickRange);
+            rangeInfo[poolId][false].sqrtPriceX96Lower = TickMath.getSqrtPriceAtTick(tick - halfLargeTickRange);
+            rangeInfo[poolId][false].sqrtPriceX96Upper = TickMath.getSqrtPriceAtTick(tick + halfLargeTickRange);
+
+            rangeInfo[poolId][true].tickLower = tick - halfNarrowTickRange;
+            rangeInfo[poolId][true].tickUpper = tick + halfNarrowTickRange;
+            rangeInfo[poolId][false].tickLower = tick - halfLargeTickRange;
+            rangeInfo[poolId][false].tickUpper = tick + halfLargeTickRange;
+        }
+
         return this.afterInitialize.selector;
     }
 
@@ -139,15 +170,35 @@ contract FungiHook is BaseHook {
         return (this.afterSwap.selector, 0);
     }
 
-    function addLiquidity(bool large, uint256 amountDesired0, uint256 amountDesired1, PoolId poolId) external {
-        // calculate ratios
+    function addLiquidity(bool narrow, uint256 amountDesired0, uint256 amountDesired1, PoolId poolId) external {
+        // Get current pool price
+        (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(poolId);
 
-        // Swap one for the other
+        // Cache Struct
+        RangeInfo memory rangeInfo_ = rangeInfo[poolId][narrow];
 
-        // Calculate liquidity in narrow/large
+        // Get liquidity for amounts
+        uint128 liquidity = LiquidityAmounts.getLiquidityForAmounts(
+            sqrtPriceX96, rangeInfo_.sqrtPriceX96Lower, rangeInfo_.sqrtPriceX96Upper, amountDesired0, amountDesired1
+        );
 
         // Mint LP tokens to msg.sender
+        if (rangeInfo[poolId][narrow].totalLiquidity == 0) {
+            rangeInfo_.lpToken.mint(msg.sender, liquidity);
+        } else {
+            // todo : add FixedPointMathLib
+            uint256 lpToMint = liquidity * rangeInfo_.lpToken.totalSupply() / rangeInfo_.totalLiquidity;
+            rangeInfo_.lpToken.mint(msg.sender, lpToMint);
+        }
 
         // Add liquidity in pool for hook
+        IPoolManager.ModifyLiquidityParams memory modifyLiquidityParams = IPoolManager.ModifyLiquidityParams({
+            tickLower: rangeInfo_.tickLower,
+            tickUpper: rangeInfo_.tickUpper,
+            liquidityDelta: int256(liquidity),
+            salt: 0
+        });
+
+        poolManager.modifyLiquidity(poolInfo[poolId].poolKey, params, hookData);
     }
 }
