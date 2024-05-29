@@ -216,12 +216,12 @@ contract FungiHook is BaseHook {
                 salt: 0
             });
 
+            poolManager.modifyLiquidity(poolInfo[poolId].poolKey, params, "");
+
             // Return leftovers to msg.sender
             // todo : check if can use returned BalanceDelta from modifyLiquidityParams instead of calling balance
             ERC20(token0).safeTransfer(msg.sender, ERC20(token0).balanceOf(address(this)));
             ERC20(token1).safeTransfer(msg.sender, ERC20(token1).balanceOf(address(this)));
-
-            poolManager.modifyLiquidity(poolInfo[poolId].poolKey, params, "");
         }
     }
 }
