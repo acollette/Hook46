@@ -20,6 +20,7 @@ import {MultiRewardStaking} from "./MultiRewardStaking.sol";
 import {Vault} from "./Vault.sol";
 
 import {ERC20} from "solmate/tokens/ERC20.sol";
+import {SafeTransferLib} from "solmate/utils/SafeTransferLib.sol";
 
 contract FungiHook is BaseHook {
     // Use CurrencyLibrary and BalanceDeltaLibrary
@@ -29,6 +30,7 @@ contract FungiHook is BaseHook {
     using BalanceDeltaLibrary for BalanceDelta;
     using PoolIdLibrary for PoolKey;
     using StateLibrary for IPoolManager;
+    using SafeTransferLib for ERC20;
 
     /*//////////////////////////////////////////////////////////////
                               CONSTANTS
@@ -185,7 +187,7 @@ contract FungiHook is BaseHook {
         );
 
         // Mint LP tokens to msg.sender
-        if (rangeInfo[poolId][narrow].totalLiquidity == 0) {
+        if (rangeInfo_.totalLiquidity == 0) {
             rangeInfo_.lpToken.mint(msg.sender, liquidity);
         } else {
             // todo : add FixedPointMathLib
@@ -197,13 +199,29 @@ contract FungiHook is BaseHook {
         rangeInfo[poolId][narrow].totalLiquidity += liquidity;
 
         // Add liquidity in pool for hook
-        IPoolManager.ModifyLiquidityParams memory params = IPoolManager.ModifyLiquidityParams({
-            tickLower: rangeInfo_.tickLower,
-            tickUpper: rangeInfo_.tickUpper,
-            liquidityDelta: int256(int128(liquidity)),
-            salt: 0
-        });
-        
-        poolManager.modifyLiquidity(poolInfo[poolId].poolKey, params, "");
+        {
+            address token0 = Currency.unwrap(poolInfo[poolId].poolKey.currency0);
+            address token1 = Currency.unwrap(poolInfo[poolId].poolKey.currency1);
+
+            ERC20(token0).safeTransferFrom(msg.sender, address(this), amountDesired0);
+            ERC20(token1).safeTransferFrom(msg.sender, address(this), amountDesired1);
+
+            ERC20(token0).approve(address(poolManager), amountDesired0);
+            ERC20(token1).approve(address(poolManager), amountDesired1);
+
+            IPoolManager.ModifyLiquidityParams memory params = IPoolManager.ModifyLiquidityParams({
+                tickLower: rangeInfo_.tickLower,
+                tickUpper: rangeInfo_.tickUpper,
+                liquidityDelta: int256(int128(liquidity)),
+                salt: 0
+            });
+
+            // Return leftovers to msg.sender
+            // todo : check if can use returned BalanceDelta from modifyLiquidityParams instead of calling balance
+            ERC20(token0).safeTransfer(msg.sender, ERC20(token0).balanceOf(address(this)));
+            ERC20(token1).safeTransfer(msg.sender, ERC20(token1).balanceOf(address(this)));
+
+            poolManager.modifyLiquidity(poolInfo[poolId].poolKey, params, "");
+        }
     }
 }
