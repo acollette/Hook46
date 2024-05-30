@@ -186,6 +186,32 @@ contract FungiHook is BaseHook {
             sqrtPriceX96, rangeInfo_.sqrtPriceX96Lower, rangeInfo_.sqrtPriceX96Upper, amountDesired0, amountDesired1
         );
 
+        // Add liquidity in pool for hook
+        {
+            Currency currency0 = poolInfo[poolId].poolKey.currency0;
+            Currency currency1 = poolInfo[poolId].poolKey.currency1;
+
+            // Caller has to approve poolManager for tokens
+
+            IPoolManager.ModifyLiquidityParams memory params = IPoolManager.ModifyLiquidityParams({
+                tickLower: rangeInfo_.tickLower,
+                tickUpper: rangeInfo_.tickUpper,
+                liquidityDelta: int256(int128(liquidity)),
+                salt: 0
+            });
+
+            // Call modifyLiquidity()
+            // todo : unlock first poolManager
+            (BalanceDelta callerDelta, BalanceDelta feesAccrued) =
+                poolManager.modifyLiquidity(poolInfo[poolId].poolKey, params, "");
+
+            // Process deltas
+            processBalanceDelta(msg.sender, msg.sender, currency0, currency1, callerDelta);
+
+            // todo : Distribute fees
+            processBalanceDelta(address(this), address(this), currency0, currency1, feesAccrued);
+        }
+
         // Mint LP tokens to msg.sender
         if (rangeInfo_.totalLiquidity == 0) {
             rangeInfo_.lpToken.mint(msg.sender, liquidity);
@@ -197,31 +223,61 @@ contract FungiHook is BaseHook {
 
         // Increase total liquidity for specific range
         rangeInfo[poolId][narrow].totalLiquidity += liquidity;
+    }
 
-        // Add liquidity in pool for hook
-        {
-            address token0 = Currency.unwrap(poolInfo[poolId].poolKey.currency0);
-            address token1 = Currency.unwrap(poolInfo[poolId].poolKey.currency1);
+    /*     function _collectFeesAndDistribute(PoolId poolId, bool narrow) internal {
+        abi.decode(
+            poolManager.unlock(
+                abi.encodeCall(
+                    this.pullFees, (poolInfo[poolId].poolKey, rangeInfo[poolId][narrow].tickLower, rangeInfo[poolId][narrow].tickUpper)
+                )
+            ),
+            (BalanceDelta)
+        );
+    } */
 
-            ERC20(token0).safeTransferFrom(msg.sender, address(this), amountDesired0);
-            ERC20(token1).safeTransferFrom(msg.sender, address(this), amountDesired1);
+    function pullFees(PoolKey memory poolKey, int24 tickLower, int24 tickUpper)
+        public
+        returns (BalanceDelta feesAccrued)
+    {
+        (, feesAccrued) = poolManager.modifyLiquidity(
+            poolKey,
+            IPoolManager.ModifyLiquidityParams({tickLower: tickLower, tickUpper: tickUpper, liquidityDelta: 0, salt: ""}),
+            new bytes(0)
+        );
 
-            ERC20(token0).approve(address(poolManager), amountDesired0);
-            ERC20(token1).approve(address(poolManager), amountDesired1);
+        processBalanceDelta(address(this), address(this), poolKey.currency0, poolKey.currency1, feesAccrued);
+    }
 
-            IPoolManager.ModifyLiquidityParams memory params = IPoolManager.ModifyLiquidityParams({
-                tickLower: rangeInfo_.tickLower,
-                tickUpper: rangeInfo_.tickUpper,
-                liquidityDelta: int256(int128(liquidity)),
-                salt: 0
-            });
+    function processBalanceDelta(
+        address sender,
+        address recipient,
+        Currency currency0,
+        Currency currency1,
+        BalanceDelta delta
+    ) internal {
+        if (delta.amount0() > 0) {
+            if (currency0.isNative()) {
+                poolManager.settle{value: uint128(delta.amount0())}(currency0);
+            } else {
+                ERC20(Currency.unwrap(currency0)).transferFrom(sender, address(poolManager), uint128(delta.amount0()));
+                poolManager.settle(currency0);
+            }
+        }
+        if (delta.amount1() > 0) {
+            if (currency1.isNative()) {
+                poolManager.settle{value: uint128(delta.amount1())}(currency1);
+            } else {
+                ERC20(Currency.unwrap(currency1)).transferFrom(sender, address(poolManager), uint128(delta.amount1()));
+                poolManager.settle(currency1);
+            }
+        }
 
-            poolManager.modifyLiquidity(poolInfo[poolId].poolKey, params, "");
-
-            // Return leftovers to msg.sender
-            // todo : check if can use returned BalanceDelta from modifyLiquidityParams instead of calling balance
-            ERC20(token0).safeTransfer(msg.sender, ERC20(token0).balanceOf(address(this)));
-            ERC20(token1).safeTransfer(msg.sender, ERC20(token1).balanceOf(address(this)));
+        if (delta.amount0() < 0) {
+            poolManager.take(currency0, recipient, uint128(-delta.amount0()));
+        }
+        if (delta.amount1() < 0) {
+            poolManager.take(currency1, recipient, uint128(-delta.amount1()));
         }
     }
 }
