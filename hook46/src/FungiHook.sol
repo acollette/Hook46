@@ -187,30 +187,15 @@ contract FungiHook is BaseHook {
         );
 
         // Add liquidity in pool for hook
-        {
-            Currency currency0 = poolInfo[poolId].poolKey.currency0;
-            Currency currency1 = poolInfo[poolId].poolKey.currency1;
+        (, BalanceDelta feesAccrued) = abi.decode(
+            poolManager.unlock(
+                abi.encodeCall(this.addLiquidityPM, (poolId, narrow, int256(int128(liquidity)), msg.sender))
+            ),
+            (BalanceDelta, BalanceDelta)
+        );
 
-            // Caller has to approve poolManager for tokens
-
-            IPoolManager.ModifyLiquidityParams memory params = IPoolManager.ModifyLiquidityParams({
-                tickLower: rangeInfo_.tickLower,
-                tickUpper: rangeInfo_.tickUpper,
-                liquidityDelta: int256(int128(liquidity)),
-                salt: 0
-            });
-
-            // Call modifyLiquidity()
-            // todo : unlock first poolManager
-            (BalanceDelta callerDelta, BalanceDelta feesAccrued) =
-                poolManager.modifyLiquidity(poolInfo[poolId].poolKey, params, "");
-
-            // Process deltas
-            processBalanceDelta(msg.sender, msg.sender, currency0, currency1, callerDelta);
-
-            // todo : Distribute fees
-            processBalanceDelta(address(this), address(this), currency0, currency1, feesAccrued);
-        }
+        // Distribute the fees
+        _distributeFees(poolId, narrow, feesAccrued.amount0(), feesAccrued.amount1());
 
         // Mint LP tokens to msg.sender
         if (rangeInfo_.totalLiquidity == 0) {
@@ -225,28 +210,41 @@ contract FungiHook is BaseHook {
         rangeInfo[poolId][narrow].totalLiquidity += liquidity;
     }
 
-    /*     function _collectFeesAndDistribute(PoolId poolId, bool narrow) internal {
-        abi.decode(
-            poolManager.unlock(
-                abi.encodeCall(
-                    this.pullFees, (poolInfo[poolId].poolKey, rangeInfo[poolId][narrow].tickLower, rangeInfo[poolId][narrow].tickUpper)
-                )
-            ),
-            (BalanceDelta)
-        );
-    } */
-
-    function pullFees(PoolKey memory poolKey, int24 tickLower, int24 tickUpper)
-        public
-        returns (BalanceDelta feesAccrued)
+    function addLiquidityPM(PoolId poolId, bool narrow, int256 liquidity, address sender)
+        external
+        poolManagerOnly
+        returns (BalanceDelta callerDelta, BalanceDelta feesAccrued)
     {
-        (, feesAccrued) = poolManager.modifyLiquidity(
-            poolKey,
-            IPoolManager.ModifyLiquidityParams({tickLower: tickLower, tickUpper: tickUpper, liquidityDelta: 0, salt: ""}),
-            new bytes(0)
-        );
+        Currency currency0 = poolInfo[poolId].poolKey.currency0;
+        Currency currency1 = poolInfo[poolId].poolKey.currency1;
 
-        processBalanceDelta(address(this), address(this), poolKey.currency0, poolKey.currency1, feesAccrued);
+        // Caller has to approve poolManager for tokens
+        IPoolManager.ModifyLiquidityParams memory params = IPoolManager.ModifyLiquidityParams({
+            tickLower: rangeInfo[poolId][narrow].tickLower,
+            tickUpper: rangeInfo[poolId][narrow].tickUpper,
+            liquidityDelta: int256(int128(liquidity)),
+            salt: bytes32(uint256(uint160(address(this))))
+        });
+
+        // Call modifyLiquidity()
+        (callerDelta, feesAccrued) = poolManager.modifyLiquidity(poolInfo[poolId].poolKey, params, "");
+
+        // Process deltas
+        processBalanceDelta(sender, sender, currency0, currency1, callerDelta);
+        processBalanceDelta(address(this), address(this), currency0, currency1, feesAccrued);
+    }
+
+    // todo: only distribute once per block
+    function _distributeFees(PoolId poolId, bool narrow, int128 amount0, int128 amount1) internal {
+        MultiRewardStaking multiReward_ =
+            narrow ? poolInfo[poolId].multiRewardNarrow : poolInfo[poolId].multiRewardLarge;
+        if (amount0 > 0) {
+            multiReward_.depositReward(Currency.unwrap(poolInfo[poolId].poolKey.currency0), uint256(uint128(amount0)));
+        }
+
+        if (amount1 > 0) {
+            multiReward_.depositReward(Currency.unwrap(poolInfo[poolId].poolKey.currency1), uint256(uint128(amount1)));
+        }
     }
 
     function processBalanceDelta(
