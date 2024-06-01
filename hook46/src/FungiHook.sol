@@ -256,7 +256,31 @@ contract FungiHook is BaseHook {
         if (lpToken_.balanceOf(msg.sender) < lpAmount) revert BalanceTooLow();
 
         // Check if range is active
-        if (rangeInfo_.isActive) {} else {
+        if (rangeInfo_.isActive) {
+            // Collect fees and distribute
+
+            // Decrease totalLiquidity
+
+            // Get liquidity for amounts
+            uint128 liquidity = LiquidityAmounts.getLiquidityForAmounts(
+                sqrtPriceX96, rangeInfo_.sqrtPriceX96Lower, rangeInfo_.sqrtPriceX96Upper, amountDesired0, amountDesired1
+            );
+
+            // Add liquidity in pool for hook
+            (, BalanceDelta feesAccrued) = abi.decode(
+                poolManager.unlock(
+                    abi.encodeCall(this.addLiquidityPM, (poolId, narrow, int256(int128(liquidity)), msg.sender))
+                ),
+                (BalanceDelta, BalanceDelta)
+            );
+
+            // Distribute the fees
+            _distributeFees(poolId, narrow, feesAccrued.amount0(), feesAccrued.amount1());
+
+            // Increase total liquidity for specific range
+            rangeInfo[poolId][narrow].totalLiquidity += liquidity;
+        } else {
+            // Todo : Collect fees and distribute first (do we really need to distribute the fees from the Vault ? Don't think so but maybe cleaner)
             // Check which token the position is fully in and how much of assets it represents
             Vault activeVault =
                 currentTick <= rangeInfo_.tickLower ? poolInfo[poolId].vaultToken0 : poolInfo[poolId].vaultToken1;
@@ -270,34 +294,6 @@ contract FungiHook is BaseHook {
             // Burn lp tokens
             lpToken_.burn(msg.sender, lpAmount);
         }
-
-        // Get liquidity for amounts
-        uint128 liquidity = LiquidityAmounts.getLiquidityForAmounts(
-            sqrtPriceX96, rangeInfo_.sqrtPriceX96Lower, rangeInfo_.sqrtPriceX96Upper, amountDesired0, amountDesired1
-        );
-
-        // Add liquidity in pool for hook
-        (, BalanceDelta feesAccrued) = abi.decode(
-            poolManager.unlock(
-                abi.encodeCall(this.addLiquidityPM, (poolId, narrow, int256(int128(liquidity)), msg.sender))
-            ),
-            (BalanceDelta, BalanceDelta)
-        );
-
-        // Distribute the fees
-        _distributeFees(poolId, narrow, feesAccrued.amount0(), feesAccrued.amount1());
-
-        // Mint LP tokens to msg.sender
-        if (rangeInfo_.totalLiquidity == 0) {
-            rangeInfo_.lpToken.mint(msg.sender, liquidity);
-        } else {
-            // todo : add FixedPointMathLib
-            uint256 lpToMint = liquidity * rangeInfo_.lpToken.totalSupply() / rangeInfo_.totalLiquidity;
-            rangeInfo_.lpToken.mint(msg.sender, lpToMint);
-        }
-
-        // Increase total liquidity for specific range
-        rangeInfo[poolId][narrow].totalLiquidity += liquidity;
     }
 
     // todo: only distribute once per block
