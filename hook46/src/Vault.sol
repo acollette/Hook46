@@ -62,22 +62,22 @@ contract Vault is Owned {
         emit Deposit(msg.sender, narrow, assets, shares);
     }
 
-    function withdraw(uint256 assets, bool narrow) external onlyOwner returns (uint256 shares) {
+    function withdraw(uint256 assets, bool narrow, address receiver) external onlyOwner returns (uint256 shares) {
         shares = previewWithdraw(assets, narrow); // No need to check for rounding error, previewWithdraw rounds up.
 
         rangeToShares[narrow] -= shares;
 
         // todo : withdraw from strategy
 
-        emit Withdraw(msg.sender, narrow, assets, shares);
+        emit Withdraw(receiver, narrow, assets, shares);
 
-        asset.safeTransfer(msg.sender, assets);
+        asset.safeTransfer(receiver, assets);
     }
 
     function redeem(bool narrow) external onlyOwner returns (uint256 assets) {
         // Check for rounding error since we round down in previewRedeem.
         uint256 shares = rangeToShares[narrow];
-        require((assets = previewRedeem(shares, narrow)) != 0, "ZERO_ASSETS");
+        require((assets = previewRedeem(narrow)) != 0, "ZERO_ASSETS");
 
         rangeToShares[narrow] = 0;
 
@@ -94,14 +94,14 @@ contract Vault is Owned {
 
     function totalAssets() public view returns (uint256) {}
 
-    function totalAssetsNarrow() public view returns (uint256 assets) {
-        uint256 narrowShares = rangeToShares[true];
-        assets = narrowShares.mulDivDown(totalAssets(), narrowShares + rangeToShares[false]);
-    }
-
-    function totalAssetsLarge() public view returns (uint256 assets) {
-        uint256 largeShares = rangeToShares[false];
-        assets = largeShares.mulDivDown(totalAssets(), largeShares + rangeToShares[true]);
+    function totalAssetsForRange(bool narrow) public view returns (uint256 assets) {
+        if (narrow) {
+            uint256 narrowShares = rangeToShares[true];
+            assets = narrowShares.mulDivDown(totalAssets(), narrowShares + rangeToShares[false]);
+        } else {
+            uint256 narrowShares = rangeToShares[true];
+            assets = narrowShares.mulDivDown(totalAssets(), narrowShares + rangeToShares[false]);
+        }
     }
 
     function convertToShares(uint256 assets, bool narrow) public view returns (uint256 shares) {
@@ -112,8 +112,8 @@ contract Vault is Owned {
         }
     }
 
-    function convertToAssets(uint256 shares, bool narrow) public view returns (uint256 assets) {
-        assets = narrow ? totalAssetsNarrow() : totalAssetsLarge();
+    function convertToAssets(bool narrow) public view returns (uint256 assets) {
+        assets = totalAssetsForRange(narrow);
     }
 
     function previewDeposit(uint256 assets, bool narrow) public view returns (uint256) {
@@ -121,11 +121,11 @@ contract Vault is Owned {
     }
 
     function previewWithdraw(uint256 assets, bool narrow) public view returns (uint256 shares) {
-        uint256 totalAssetsForRange = narrow ? totalAssetsNarrow() : totalAssetsLarge();
-        shares = assets.mulDivUp(rangeToShares[narrow], totalAssetsForRange);
+        uint256 totalAssetsForRange_ = totalAssetsForRange(narrow);
+        shares = assets.mulDivUp(rangeToShares[narrow], totalAssetsForRange_);
     }
 
-    function previewRedeem(uint256 shares, bool narrow) public view returns (uint256) {
-        return convertToAssets(shares, narrow);
+    function previewRedeem(bool narrow) public view returns (uint256) {
+        return convertToAssets(narrow);
     }
 }

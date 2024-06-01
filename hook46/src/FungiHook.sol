@@ -71,6 +71,12 @@ contract FungiHook is BaseHook {
     }
 
     /*//////////////////////////////////////////////////////////////
+                              ERRORS
+    //////////////////////////////////////////////////////////////*/
+
+    error BalanceTooLow();
+
+    /*//////////////////////////////////////////////////////////////
                             CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
 
@@ -238,22 +244,32 @@ contract FungiHook is BaseHook {
     }
 
     function removeLiquidity(PoolId poolId, bool narrow, uint256 lpAmount) external {
-        // Cache pointer
+        // Get current tick of pool
+        (, int24 currentTick,,) = poolManager.getSlot0(poolId);
+
+        // Cache storage pointer
         RangeInfo storage rangeInfo_ = rangeInfo[poolId][narrow];
+
         // Get lpToken
         LPToken lpToken_ = rangeInfo_.lpToken;
+
+        if (lpToken_.balanceOf(msg.sender) < lpAmount) revert BalanceTooLow();
+
         // Check if range is active
-        if (rangeInfo_.isActive) {
+        if (rangeInfo_.isActive) {} else {
+            // Check which token the position is fully in and how much of assets it represents
+            Vault activeVault =
+                currentTick <= rangeInfo_.tickLower ? poolInfo[poolId].vaultToken0 : poolInfo[poolId].vaultToken1;
 
-        } else {
-            lpToken_.safeTransferFrom(msg.sender, address(this), lpAmount);
+            // Convert LP to number of assets to withdraw (LP number represents share of liquidity)
+            uint256 assets = lpAmount.mulDivDown(activeVault.totalAssetsForRange(narrow), lpToken_.totalSupply());
 
-            // Todo
+            // Withdraw from Vault the number of assets to the msg.sender
+            activeVault.withdraw(assets, narrow, msg.sender);
 
+            // Burn lp tokens
+            lpToken_.burn(msg.sender, lpAmount);
         }
-
-        // Cache Struct
-        RangeInfo memory rangeInfo_ = rangeInfo[poolId][narrow];
 
         // Get liquidity for amounts
         uint128 liquidity = LiquidityAmounts.getLiquidityForAmounts(
