@@ -22,6 +22,9 @@ import {Vault} from "./Vault.sol";
 import {ERC20} from "solmate/tokens/ERC20.sol";
 import {SafeTransferLib} from "solmate/utils/SafeTransferLib.sol";
 
+// todo: refactor to have only one LP token from the Vault. Mint based on liquidity.
+// note : we keep vault as we might change the strategies of the Vault which makes it interesting.
+
 contract FungiHook is BaseHook {
     // Use CurrencyLibrary and BalanceDeltaLibrary
     // to add some helper functions over the Currency and BalanceDelta
@@ -232,6 +235,53 @@ contract FungiHook is BaseHook {
         // Process deltas
         processBalanceDelta(sender, sender, currency0, currency1, callerDelta);
         processBalanceDelta(address(this), address(this), currency0, currency1, feesAccrued);
+    }
+
+    function removeLiquidity(PoolId poolId, bool narrow, uint256 lpAmount) external {
+        // Cache pointer
+        RangeInfo storage rangeInfo_ = rangeInfo[poolId][narrow];
+        // Get lpToken
+        LPToken lpToken_ = rangeInfo_.lpToken;
+        // Check if range is active
+        if (rangeInfo_.isActive) {
+
+        } else {
+            lpToken_.safeTransferFrom(msg.sender, address(this), lpAmount);
+
+            // Todo
+
+        }
+
+        // Cache Struct
+        RangeInfo memory rangeInfo_ = rangeInfo[poolId][narrow];
+
+        // Get liquidity for amounts
+        uint128 liquidity = LiquidityAmounts.getLiquidityForAmounts(
+            sqrtPriceX96, rangeInfo_.sqrtPriceX96Lower, rangeInfo_.sqrtPriceX96Upper, amountDesired0, amountDesired1
+        );
+
+        // Add liquidity in pool for hook
+        (, BalanceDelta feesAccrued) = abi.decode(
+            poolManager.unlock(
+                abi.encodeCall(this.addLiquidityPM, (poolId, narrow, int256(int128(liquidity)), msg.sender))
+            ),
+            (BalanceDelta, BalanceDelta)
+        );
+
+        // Distribute the fees
+        _distributeFees(poolId, narrow, feesAccrued.amount0(), feesAccrued.amount1());
+
+        // Mint LP tokens to msg.sender
+        if (rangeInfo_.totalLiquidity == 0) {
+            rangeInfo_.lpToken.mint(msg.sender, liquidity);
+        } else {
+            // todo : add FixedPointMathLib
+            uint256 lpToMint = liquidity * rangeInfo_.lpToken.totalSupply() / rangeInfo_.totalLiquidity;
+            rangeInfo_.lpToken.mint(msg.sender, lpToMint);
+        }
+
+        // Increase total liquidity for specific range
+        rangeInfo[poolId][narrow].totalLiquidity += liquidity;
     }
 
     // todo: only distribute once per block
