@@ -99,8 +99,8 @@ contract Vault is Owned {
             uint256 narrowShares = rangeToShares[true];
             assets = narrowShares.mulDivDown(totalAssets(), narrowShares + rangeToShares[false]);
         } else {
-            uint256 narrowShares = rangeToShares[true];
-            assets = narrowShares.mulDivDown(totalAssets(), narrowShares + rangeToShares[false]);
+            uint256 largeShares = rangeToShares[false];
+            assets = largeShares.mulDivDown(totalAssets(), largeShares + rangeToShares[true]);
         }
     }
 

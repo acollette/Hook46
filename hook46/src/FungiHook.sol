@@ -8,6 +8,7 @@ import {CurrencyLibrary, Currency} from "v4-core/types/Currency.sol";
 import {BalanceDeltaLibrary, BalanceDelta} from "v4-core/types/BalanceDelta.sol";
 import {PoolKey} from "v4-core/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "v4-core/types/PoolId.sol";
+import {Position} from "v4-core/libraries/Position.sol";
 
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 
@@ -20,10 +21,11 @@ import {MultiRewardStaking} from "./MultiRewardStaking.sol";
 import {Vault} from "./Vault.sol";
 
 import {ERC20} from "solmate/tokens/ERC20.sol";
+import {FixedPointMathLib} from "solmate/utils/FixedPointMathLib.sol";
 import {SafeTransferLib} from "solmate/utils/SafeTransferLib.sol";
 
-// todo: refactor to have only one LP token from the Vault. Mint based on liquidity.
 // note : we keep vault as we might change the strategies of the Vault which makes it interesting.
+// note : We can distribute rewards easily to the multiRewardStaking
 
 contract FungiHook is BaseHook {
     // Use CurrencyLibrary and BalanceDeltaLibrary
@@ -34,6 +36,7 @@ contract FungiHook is BaseHook {
     using PoolIdLibrary for PoolKey;
     using StateLibrary for IPoolManager;
     using SafeTransferLib for ERC20;
+    using FixedPointMathLib for uint256;
 
     /*//////////////////////////////////////////////////////////////
                               CONSTANTS
@@ -47,6 +50,8 @@ contract FungiHook is BaseHook {
     /*//////////////////////////////////////////////////////////////
                               STORAGE
     //////////////////////////////////////////////////////////////*/
+
+    int24 internal lastTick;
 
     mapping(PoolId poolId => PoolInfo) public poolInfo;
     mapping(PoolId poolId => mapping(bool narrow => RangeInfo)) public rangeInfo;
@@ -97,8 +102,8 @@ contract FungiHook is BaseHook {
             beforeInitialize: false,
             afterInitialize: true,
             beforeAddLiquidity: false,
-            afterAddLiquidity: true,
-            beforeRemoveLiquidity: true,
+            afterAddLiquidity: false,
+            beforeRemoveLiquidity: false,
             afterRemoveLiquidity: false,
             beforeSwap: false,
             afterSwap: true,
@@ -121,6 +126,9 @@ contract FungiHook is BaseHook {
         PoolId poolId = key.toId();
         address token0 = Currency.unwrap(key.currency0);
         address token1 = Currency.unwrap(key.currency1);
+
+        // Store current tick as last tick
+        lastTick = tick;
 
         // Map the current tick 1:1 (assuming initialization is done stable price)
         poolInfo[poolId].initialTick = tick;
@@ -150,8 +158,8 @@ contract FungiHook is BaseHook {
         }
 
         // Deploy Vaults
-        poolInfo[poolId].vaultToken0 = new Vault(ERC20(token0), "Fungi-0", "FUN0");
-        poolInfo[poolId].vaultToken0 = new Vault(ERC20(token1), "Fungi-1", "FUN1");
+        poolInfo[poolId].vaultToken0 = new Vault(ERC20(token0));
+        poolInfo[poolId].vaultToken0 = new Vault(ERC20(token1));
 
         // Add sqrtPrices for tick ranges
         {
@@ -172,6 +180,9 @@ contract FungiHook is BaseHook {
         return this.afterInitialize.selector;
     }
 
+    /* ///////////////////////////////////////////////////////////////
+                            SWAP LOGIC
+    /////////////////////////////////////////////////////////////// */
     function afterSwap(
         address,
         PoolKey calldata key,
@@ -180,8 +191,107 @@ contract FungiHook is BaseHook {
         bytes calldata hookData
     ) external override poolManagerOnly returns (bytes4, int128) {
         // Check if needs to invest out of range liquidity
+        // Get current pool price
+        PoolId poolId = key.toId();
+        (uint160 sqrtPriceX96, int24 tick,,) = poolManager.getSlot0(poolId);
+
+        RangeInfo memory rangeInfoNarrow = rangeInfo[poolId][true];
+        RangeInfo memory rangeInfoLarge = rangeInfo[poolId][false];     
+
+        // Check for ranges if they change status
+        if (tick > rangeInfoNarrow.tickLower && tick < rangeInfoNarrow.tickUpper) {
+            if (rangeInfoNarrow.active == false) _vaultToPool(tick, sqrtPriceX96, true, poolId, rangeInfoNarrow);
+            if (rangeInfoLarge.active == false) _vaultToPool(tick, sqrtPriceX96, false, poolId, rangeInfoLarge);
+        } else if (tick > rangeInfoLarge.tickLower && tick < rangeInfoLarge.tickUpper) {
+            if (rangeInfoNarrow.active == true) _poolToVault();
+            if (rangeInfoLarge.active == false) _vaultToPool();
+        } else {
+            if (rangeInfoNarrow.active == true) _poolToVault();
+            if (rangeInfoLarge.active == true) _poolToVault();
+        }
+
+        // Store last tick
+        lastTick = tick;
+
         return (this.afterSwap.selector, 0);
     }
+
+    function _vaultToPool(int24 currentTick, uint160 sqrtPriceX96, bool narrow, PoolId poolId, RangeInfo memory rangeInfo_) internal {
+        // todo : due to possible slippage, can have dust amounts leftover - distribute as fees or send back to Vault ?
+        // Redeem funds from Vault
+        bool zeroForOne;
+        uint256 amountToSwap;
+        uint160 sqrtPriceLimitX96;
+        if (currentTick > lastTick) {
+            // Redeem from Vault
+            uint256 assets = poolInfo[poolId].vaultToken0.redeem(narrow);
+
+            zeroForOne = true;
+
+            // Rebalance amount received from Vault so that the ratio of the amounts to deposit matches with ratio of the ticks.
+            uint256 ticksLowerToCurrent = uint256(uint24(currentTick - rangeInfo_.tickLower));
+            uint256 ticksLowerToUpper = uint256(uint24(rangeInfo_.tickUpper - rangeInfo_.tickLower));
+            uint256 targetRatio = ticksLowerToCurrent.mulDivDown(1e18, ticksLowerToUpper);
+
+            amountToSwap = targetRatio.mulDivDown(assets, 1e18);
+            sqrtPriceLimitX96 = rangeInfo_.sqrtPriceX96Lower;
+        } else if (currentTick < lastTick) {
+            // Redeem from Vault
+            uint256 assets = poolInfo[poolId].vaultToken1.redeem(narrow);
+
+            // Rebalance amount received from Vault so that the ratio of the amounts to deposit matches with ratio of the ticks.
+            uint256 ticksCurrentToUpper = uint256(uint24(rangeInfo_.tickUpper - currentTick));
+            uint256 ticksLowerToUpper = uint256(uint24(rangeInfo_.tickUpper - rangeInfo_.tickLower));
+            uint256 targetRatio = ticksCurrentToUpper.mulDivDown(1e18, ticksLowerToUpper);
+
+            amountToSwap = targetRatio.mulDivDown(assets, 1e18);
+            sqrtPriceLimitX96 = rangeInfo_.sqrtPriceX96Upper;
+        }
+
+        IPoolManager.SwapParams memory params = IPoolManager.SwapParams({
+            zeroForOne: zeroForOne,
+            amountSpecified: int256(amountToSwap),
+            sqrtPriceLimitX96: sqrtPriceLimitX96
+        });
+
+        // Swap tokens to target ratios
+        BalanceDelta swapDelta = abi.decode(
+            poolManager.unlock(abi.encodeCall(this.swapPM, (poolInfo[poolId].poolKey, params))), (BalanceDelta)
+        );
+
+        // Deposit tokens in pool
+        // Get liquidity for amounts
+        Currency currency0 = poolInfo[poolId].poolKey.currency0;
+        Currency currency1 = poolInfo[poolId].poolKey.currency1;
+
+        uint256 token0Balance = ERC20(Currency.unwrap(currency0)).balanceOf(address(this));
+        uint256 token1Balance = ERC20(Currency.unwrap(currency1)).balanceOf(address(this));
+
+        uint128 liquidity = LiquidityAmounts.getLiquidityForAmounts(
+            sqrtPriceX96, rangeInfo_.sqrtPriceX96Lower, rangeInfo_.sqrtPriceX96Upper, token0Balance, token1Balance
+        );
+
+        // Add liquidity in pool for hook
+        (BalanceDelta callerDelta,) = abi.decode(
+            poolManager.unlock(
+                abi.encodeCall(this.addLiquidityPM, (poolId, narrow, int256(int128(liquidity)), msg.sender))
+            ),
+            (BalanceDelta, BalanceDelta)
+        );
+    }
+
+    function swapPM(PoolKey memory key, IPoolManager.SwapParams memory params) external poolManagerOnly {
+        BalanceDelta swapDelta = poolManager.swap(key, params, "");
+
+        // Process deltas
+        processBalanceDelta(address(this), address(this), key.currency0, key.currency1, swapDelta);
+    }
+
+    function _poolToVault(int24) internal {}
+
+    /* ///////////////////////////////////////////////////////////////
+                      ADDING AND REMOVING LIQUIDITY
+    /////////////////////////////////////////////////////////////// */
 
     function addLiquidity(bool narrow, uint256 amountDesired0, uint256 amountDesired1, PoolId poolId) external {
         // Get current pool price
@@ -214,9 +324,44 @@ contract FungiHook is BaseHook {
             uint256 lpToMint = liquidity * rangeInfo_.lpToken.totalSupply() / rangeInfo_.totalLiquidity;
             rangeInfo_.lpToken.mint(msg.sender, lpToMint);
         }
+    }
 
-        // Increase total liquidity for specific range
-        rangeInfo[poolId][narrow].totalLiquidity += liquidity;
+    function removeLiquidity(PoolId poolId, bool narrow, uint256 lpAmount) external {
+        // Get current tick of pool
+        (, int24 currentTick,,) = poolManager.getSlot0(poolId);
+
+        // Cache storage pointer
+        RangeInfo storage rangeInfo_ = rangeInfo[poolId][narrow];
+
+        // Get lpToken
+        LPToken lpToken_ = rangeInfo_.lpToken;
+
+        if (lpToken_.balanceOf(msg.sender) < lpAmount) revert BalanceTooLow();
+
+        // Check if range is active
+        if (rangeInfo_.active) {
+            // Convert lp balance to liquidity amount
+            // Get liquidity of position
+            int256 liquidity = int256(lpAmount.mulDivDown(rangeInfo_.totalLiquidity, rangeInfo_.lpToken.totalSupply()));
+
+            _withdrawLiquidityAndFees(poolId, rangeInfo_.lpToken, lpAmount, narrow, -liquidity, msg.sender, false);
+        } else {
+            // Get and distribute the fees
+            _withdrawLiquidityAndFees(poolId, rangeInfo_.lpToken, lpAmount, narrow, 0, msg.sender, true);
+
+            // Check which token the position is fully in and how much of assets it represents
+            Vault activeVault =
+                currentTick <= rangeInfo_.tickLower ? poolInfo[poolId].vaultToken0 : poolInfo[poolId].vaultToken1;
+
+            // Convert LP to number of assets to withdraw (LP number represents share of liquidity)
+            uint256 assets = lpAmount.mulDivDown(activeVault.totalAssetsForRange(narrow), lpToken_.totalSupply());
+
+            // Withdraw from Vault the number of assets to the msg.sender
+            activeVault.withdraw(assets, narrow, msg.sender);
+
+            // Burn lp tokens
+            lpToken_.burn(msg.sender, lpAmount);
+        }
     }
 
     function addLiquidityPM(PoolId poolId, bool narrow, int256 liquidity, address sender)
@@ -241,62 +386,73 @@ contract FungiHook is BaseHook {
         // Process deltas
         processBalanceDelta(sender, sender, currency0, currency1, callerDelta);
         processBalanceDelta(address(this), address(this), currency0, currency1, feesAccrued);
+
+        // Increase total liquidity for specific range
+        rangeInfo[poolId][narrow].totalLiquidity += uint128(int128(liquidity));
     }
 
-    function removeLiquidity(PoolId poolId, bool narrow, uint256 lpAmount) external {
-        // Get current tick of pool
-        (, int24 currentTick,,) = poolManager.getSlot0(poolId);
+    function removeLiquidityPM(PoolId poolId, bool narrow, int256 liquidity, address sender, bool feesOnly)
+        external
+        poolManagerOnly
+        returns (BalanceDelta callerDelta, BalanceDelta feesAccrued)
+    {
+        Currency currency0 = poolInfo[poolId].poolKey.currency0;
+        Currency currency1 = poolInfo[poolId].poolKey.currency1;
 
-        // Cache storage pointer
-        RangeInfo storage rangeInfo_ = rangeInfo[poolId][narrow];
+        // Caller has to approve poolManager for tokens
+        IPoolManager.ModifyLiquidityParams memory params = IPoolManager.ModifyLiquidityParams({
+            tickLower: rangeInfo[poolId][narrow].tickLower,
+            tickUpper: rangeInfo[poolId][narrow].tickUpper,
+            liquidityDelta: liquidity,
+            salt: bytes32(uint256(uint160(address(this))))
+        });
 
-        // Get lpToken
-        LPToken lpToken_ = rangeInfo_.lpToken;
+        // Call modifyLiquidity()
+        (callerDelta, feesAccrued) = poolManager.modifyLiquidity(poolInfo[poolId].poolKey, params, "");
 
-        if (lpToken_.balanceOf(msg.sender) < lpAmount) revert BalanceTooLow();
-
-        // Check if range is active
-        if (rangeInfo_.isActive) {
-            // Collect fees and distribute
-
-            // Decrease totalLiquidity
-
-            // Get liquidity for amounts
-            uint128 liquidity = LiquidityAmounts.getLiquidityForAmounts(
-                sqrtPriceX96, rangeInfo_.sqrtPriceX96Lower, rangeInfo_.sqrtPriceX96Upper, amountDesired0, amountDesired1
-            );
-
-            // Add liquidity in pool for hook
-            (, BalanceDelta feesAccrued) = abi.decode(
-                poolManager.unlock(
-                    abi.encodeCall(this.addLiquidityPM, (poolId, narrow, int256(int128(liquidity)), msg.sender))
-                ),
-                (BalanceDelta, BalanceDelta)
-            );
-
-            // Distribute the fees
-            _distributeFees(poolId, narrow, feesAccrued.amount0(), feesAccrued.amount1());
-
-            // Increase total liquidity for specific range
-            rangeInfo[poolId][narrow].totalLiquidity += liquidity;
-        } else {
-            // Todo : Collect fees and distribute first (do we really need to distribute the fees from the Vault ? Don't think so but maybe cleaner)
-            // Check which token the position is fully in and how much of assets it represents
-            Vault activeVault =
-                currentTick <= rangeInfo_.tickLower ? poolInfo[poolId].vaultToken0 : poolInfo[poolId].vaultToken1;
-
-            // Convert LP to number of assets to withdraw (LP number represents share of liquidity)
-            uint256 assets = lpAmount.mulDivDown(activeVault.totalAssetsForRange(narrow), lpToken_.totalSupply());
-
-            // Withdraw from Vault the number of assets to the msg.sender
-            activeVault.withdraw(assets, narrow, msg.sender);
-
-            // Burn lp tokens
-            lpToken_.burn(msg.sender, lpAmount);
+        // Process deltas
+        if (!feesOnly) {
+            processBalanceDelta(sender, sender, currency0, currency1, callerDelta);
+            // Decrease total liquidity for specific range
+            rangeInfo[poolId][narrow].totalLiquidity -= uint128(int128(-liquidity));
         }
+        processBalanceDelta(address(this), address(this), currency0, currency1, feesAccrued);
     }
 
-    // todo: only distribute once per block
+    function _withdrawLiquidityAndFees(
+        PoolId poolId,
+        LPToken lpToken,
+        uint256 lpAmount,
+        bool narrow,
+        int256 liquidity,
+        address receiver,
+        bool feesOnly
+    ) internal returns (BalanceDelta feesAccrued) {
+        // Remove liquidity and/or fees
+        (, feesAccrued) = abi.decode(
+            poolManager.unlock(abi.encodeCall(this.removeLiquidityPM, (poolId, narrow, liquidity, receiver, feesOnly))),
+            (BalanceDelta, BalanceDelta)
+        );
+
+        // Send part of the fees to caller and distribute the rest
+        uint256 lpTotalSupply = lpToken.totalSupply();
+        uint128 feesAccrued0 = uint128(feesAccrued.amount0());
+        uint128 feesAccrued1 = uint128(feesAccrued.amount1());
+
+        uint128 fees0ForCaller = uint128(lpAmount.mulDivDown(feesAccrued0, lpTotalSupply));
+        uint128 fees1ForCaller = uint128(lpAmount.mulDivDown(feesAccrued1, lpTotalSupply));
+
+        // Send fees to receiver
+        Currency currency0 = poolInfo[poolId].poolKey.currency0;
+        Currency currency1 = poolInfo[poolId].poolKey.currency1;
+
+        ERC20(Currency.unwrap(currency0)).safeTransfer(receiver, fees0ForCaller);
+        ERC20(Currency.unwrap(currency1)).safeTransfer(receiver, fees1ForCaller);
+
+        // Distribute the remaining fees to the staking contract
+        _distributeFees(poolId, narrow, int128(feesAccrued0 - fees0ForCaller), int128(feesAccrued1 - fees1ForCaller));
+    }
+
     function _distributeFees(PoolId poolId, bool narrow, int128 amount0, int128 amount1) internal {
         MultiRewardStaking multiReward_ =
             narrow ? poolInfo[poolId].multiRewardNarrow : poolInfo[poolId].multiRewardLarge;
