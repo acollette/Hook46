@@ -4,8 +4,8 @@ pragma solidity ^0.8.0;
 import {BaseHook} from "v4-periphery/BaseHook.sol";
 import {LiquidityAmounts} from "v4-periphery/libraries/LiquidityAmounts.sol";
 
-import {CurrencyLibrary, Currency} from "v4-core/types/Currency.sol";
 import {BalanceDeltaLibrary, BalanceDelta} from "v4-core/types/BalanceDelta.sol";
+import {CurrencyLibrary, Currency} from "v4-core/types/Currency.sol";
 import {PoolKey} from "v4-core/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "v4-core/types/PoolId.sol";
 import {Position} from "v4-core/libraries/Position.sol";
@@ -116,6 +116,10 @@ contract FungiHook is BaseHook {
         });
     }
 
+    /*//////////////////////////////////////////////////////////////
+                      HOOKS LOGIC IMPLEMENTATION
+    //////////////////////////////////////////////////////////////*/
+
     function afterInitialize(address, PoolKey calldata key, uint160, int24 tick, bytes calldata)
         external
         override
@@ -180,34 +184,31 @@ contract FungiHook is BaseHook {
         return this.afterInitialize.selector;
     }
 
-    /* ///////////////////////////////////////////////////////////////
-                            SWAP LOGIC
-    /////////////////////////////////////////////////////////////// */
-    function afterSwap(
-        address,
-        PoolKey calldata key,
-        IPoolManager.SwapParams memory params,
-        BalanceDelta swapDelta,
-        bytes calldata hookData
-    ) external override poolManagerOnly returns (bytes4, int128) {
-        // Check if needs to invest out of range liquidity
+    function afterSwap(address, PoolKey calldata key, IPoolManager.SwapParams memory, BalanceDelta, bytes calldata)
+        external
+        override
+        poolManagerOnly
+        returns (bytes4, int128)
+    {
+        // todo : only rebalance periodically, not every time a range is crossed.
+        // Check if needs to invest out of range liquidity or call back liquidity from Vault
         // Get current pool price
         PoolId poolId = key.toId();
         (uint160 sqrtPriceX96, int24 tick,,) = poolManager.getSlot0(poolId);
 
         RangeInfo memory rangeInfoNarrow = rangeInfo[poolId][true];
-        RangeInfo memory rangeInfoLarge = rangeInfo[poolId][false];     
+        RangeInfo memory rangeInfoLarge = rangeInfo[poolId][false];
 
         // Check for ranges if they change status
         if (tick > rangeInfoNarrow.tickLower && tick < rangeInfoNarrow.tickUpper) {
             if (rangeInfoNarrow.active == false) _vaultToPool(tick, sqrtPriceX96, true, poolId, rangeInfoNarrow);
             if (rangeInfoLarge.active == false) _vaultToPool(tick, sqrtPriceX96, false, poolId, rangeInfoLarge);
         } else if (tick > rangeInfoLarge.tickLower && tick < rangeInfoLarge.tickUpper) {
-            if (rangeInfoNarrow.active == true) _poolToVault();
-            if (rangeInfoLarge.active == false) _vaultToPool();
+            if (rangeInfoNarrow.active == true) _poolToVault(tick, poolId, rangeInfoNarrow, true);
+            if (rangeInfoLarge.active == false) _vaultToPool(tick, sqrtPriceX96, false, poolId, rangeInfoLarge);
         } else {
-            if (rangeInfoNarrow.active == true) _poolToVault();
-            if (rangeInfoLarge.active == true) _poolToVault();
+            if (rangeInfoNarrow.active == true) _poolToVault(tick, poolId, rangeInfoNarrow, true);
+            if (rangeInfoLarge.active == true) _poolToVault(tick, poolId, rangeInfoLarge, false);
         }
 
         // Store last tick
@@ -216,7 +217,13 @@ contract FungiHook is BaseHook {
         return (this.afterSwap.selector, 0);
     }
 
-    function _vaultToPool(int24 currentTick, uint160 sqrtPriceX96, bool narrow, PoolId poolId, RangeInfo memory rangeInfo_) internal {
+    function _vaultToPool(
+        int24 currentTick,
+        uint160 sqrtPriceX96,
+        bool narrow,
+        PoolId poolId,
+        RangeInfo memory rangeInfo_
+    ) internal {
         // todo : due to possible slippage, can have dust amounts leftover - distribute as fees or send back to Vault ?
         // Redeem funds from Vault
         bool zeroForOne;
@@ -255,9 +262,7 @@ contract FungiHook is BaseHook {
         });
 
         // Swap tokens to target ratios
-        BalanceDelta swapDelta = abi.decode(
-            poolManager.unlock(abi.encodeCall(this.swapPM, (poolInfo[poolId].poolKey, params))), (BalanceDelta)
-        );
+        poolManager.unlock(abi.encodeCall(this.swapPM, (poolInfo[poolId].poolKey, params)));
 
         // Deposit tokens in pool
         // Get liquidity for amounts
@@ -272,12 +277,38 @@ contract FungiHook is BaseHook {
         );
 
         // Add liquidity in pool for hook
-        (BalanceDelta callerDelta,) = abi.decode(
+        poolManager.unlock(abi.encodeCall(this.addLiquidityPM, (poolId, narrow, int256(int128(liquidity)), msg.sender)));
+    }
+
+    function _poolToVault(int24 currentTick, PoolId poolId, RangeInfo memory rangeInfo_, bool narrow) internal {
+        // Remove liquidity from pool
+        (BalanceDelta callerDelta, BalanceDelta feesAccrued) = abi.decode(
             poolManager.unlock(
-                abi.encodeCall(this.addLiquidityPM, (poolId, narrow, int256(int128(liquidity)), msg.sender))
+                abi.encodeCall(
+                    this.removeLiquidityPM,
+                    (poolId, narrow, int256(int128(rangeInfo_.totalLiquidity)), address(this), false)
+                )
             ),
             (BalanceDelta, BalanceDelta)
         );
+
+        // Distribute the fees
+        _distributeFees(poolId, narrow, feesAccrued.amount0(), feesAccrued.amount1());
+
+        // Invest in Vault
+        if (currentTick > lastTick) {
+            // Fully in token1
+            Vault vaultToken1 = poolInfo[poolId].vaultToken1;
+            uint256 assetsToDeposit = uint256(uint128(callerDelta.amount1()));
+            vaultToken1.asset().safeApprove(address(vaultToken1), assetsToDeposit);
+            vaultToken1.deposit(assetsToDeposit, narrow);
+        } else {
+            // Fully in token0
+            Vault vaultToken0 = poolInfo[poolId].vaultToken1;
+            uint256 assetsToDeposit = uint256(uint128(callerDelta.amount0()));
+            vaultToken0.asset().safeApprove(address(vaultToken0), assetsToDeposit);
+            vaultToken0.deposit(assetsToDeposit, narrow);
+        }
     }
 
     function swapPM(PoolKey memory key, IPoolManager.SwapParams memory params) external poolManagerOnly {
@@ -287,10 +318,8 @@ contract FungiHook is BaseHook {
         processBalanceDelta(address(this), address(this), key.currency0, key.currency1, swapDelta);
     }
 
-    function _poolToVault(int24) internal {}
-
     /* ///////////////////////////////////////////////////////////////
-                      ADDING AND REMOVING LIQUIDITY
+                ADDING AND REMOVING LIQUIDITY VIA HOOK
     /////////////////////////////////////////////////////////////// */
 
     function addLiquidity(bool narrow, uint256 amountDesired0, uint256 amountDesired1, PoolId poolId) external {
@@ -464,6 +493,10 @@ contract FungiHook is BaseHook {
             multiReward_.depositReward(Currency.unwrap(poolInfo[poolId].poolKey.currency1), uint256(uint128(amount1)));
         }
     }
+
+    /* ///////////////////////////////////////////////////////////////
+                        PROCESS BALANCE DELTA
+    /////////////////////////////////////////////////////////////// */
 
     function processBalanceDelta(
         address sender,
