@@ -24,8 +24,6 @@ import {ERC20} from "solmate/tokens/ERC20.sol";
 import {FixedPointMathLib} from "solmate/utils/FixedPointMathLib.sol";
 import {SafeTransferLib} from "solmate/utils/SafeTransferLib.sol";
 
-// note : we keep vault as we might change the strategies of the Vault which makes it interesting.
-// note : We can distribute rewards easily to the multiRewardStaking
 contract FungiHook is BaseHook {
     // Use CurrencyLibrary and BalanceDeltaLibrary
     // to add some helper functions over the Currency and BalanceDelta
@@ -119,7 +117,7 @@ contract FungiHook is BaseHook {
                       HOOKS LOGIC IMPLEMENTATION
     //////////////////////////////////////////////////////////////*/
 
-    function afterInitialize(address, PoolKey calldata key, uint160, int24 tick, bytes calldata)
+    function afterInitialize(address, PoolKey calldata key, uint160, int24 tick, bytes calldata hookData)
         external
         override
         poolManagerOnly
@@ -161,8 +159,9 @@ contract FungiHook is BaseHook {
         }
 
         // Deploy Vaults
-        poolInfo[poolId].vaultToken0 = new Vault(ERC20(token0));
-        poolInfo[poolId].vaultToken0 = new Vault(ERC20(token1));
+        (address pool0, address pool1) = abi.decode(hookData, (address, address));
+        poolInfo[poolId].vaultToken0 = new Vault(ERC20(token0), pool0);
+        poolInfo[poolId].vaultToken1 = new Vault(ERC20(token1), pool1);
 
         // Add sqrtPrices for tick ranges
         {
@@ -263,17 +262,20 @@ contract FungiHook is BaseHook {
         // Swap tokens to target ratios
         poolManager.unlock(abi.encodeCall(this.swapPM, (poolInfo[poolId].poolKey, params)));
 
-        // Deposit tokens in pool
-        // Get liquidity for amounts
-        Currency currency0 = poolInfo[poolId].poolKey.currency0;
-        Currency currency1 = poolInfo[poolId].poolKey.currency1;
+        uint128 liquidity;
+        {
+            // Deposit tokens in pool
+            // Get liquidity for amounts
+            Currency currency0 = poolInfo[poolId].poolKey.currency0;
+            Currency currency1 = poolInfo[poolId].poolKey.currency1;
 
-        uint256 token0Balance = ERC20(Currency.unwrap(currency0)).balanceOf(address(this));
-        uint256 token1Balance = ERC20(Currency.unwrap(currency1)).balanceOf(address(this));
+            uint256 token0Balance = ERC20(Currency.unwrap(currency0)).balanceOf(address(this));
+            uint256 token1Balance = ERC20(Currency.unwrap(currency1)).balanceOf(address(this));
 
-        uint128 liquidity = LiquidityAmounts.getLiquidityForAmounts(
-            sqrtPriceX96, rangeInfo_.sqrtPriceX96Lower, rangeInfo_.sqrtPriceX96Upper, token0Balance, token1Balance
-        );
+            liquidity = LiquidityAmounts.getLiquidityForAmounts(
+                sqrtPriceX96, rangeInfo_.sqrtPriceX96Lower, rangeInfo_.sqrtPriceX96Upper, token0Balance, token1Balance
+            );
+        }
 
         // Add liquidity in pool for hook
         poolManager.unlock(abi.encodeCall(this.addLiquidityPM, (poolId, narrow, int256(int128(liquidity)), msg.sender)));
@@ -372,10 +374,10 @@ contract FungiHook is BaseHook {
             // Get liquidity of position
             int256 liquidity = int256(lpAmount.mulDivDown(rangeInfo_.totalLiquidity, rangeInfo_.lpToken.totalSupply()));
 
-            _withdrawLiquidityAndFees(poolId, rangeInfo_.lpToken, lpAmount, narrow, -liquidity, msg.sender, false);
+            _withdrawLiquidityAndFees(rangeInfo_.lpToken, lpAmount, narrow, -liquidity, msg.sender, false, poolId);
         } else {
             // Get and distribute the fees
-            _withdrawLiquidityAndFees(poolId, rangeInfo_.lpToken, lpAmount, narrow, 0, msg.sender, true);
+            _withdrawLiquidityAndFees(rangeInfo_.lpToken, lpAmount, narrow, 0, msg.sender, true, poolId);
 
             // Check which token the position is fully in and how much of assets it represents
             Vault activeVault =
@@ -448,13 +450,13 @@ contract FungiHook is BaseHook {
     }
 
     function _withdrawLiquidityAndFees(
-        PoolId poolId,
         LPToken lpToken,
         uint256 lpAmount,
         bool narrow,
         int256 liquidity,
         address receiver,
-        bool feesOnly
+        bool feesOnly,
+        PoolId poolId
     ) internal returns (BalanceDelta feesAccrued) {
         // Remove liquidity and/or fees
         (, feesAccrued) = abi.decode(
