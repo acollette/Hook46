@@ -2,9 +2,10 @@
 pragma solidity ^0.8.0;
 
 import {ERC20} from "solmate/tokens/ERC20.sol";
+import {FixedPointMathLib} from "solmate/utils/FixedPointMathLib.sol";
+import {AaveMockedPool} from "./mocks/AaveMockedPool.sol";
 import {Owned} from "solmate/auth/Owned.sol";
 import {SafeTransferLib} from "solmate/utils/SafeTransferLib.sol";
-import {FixedPointMathLib} from "solmate/utils/FixedPointMathLib.sol";
 
 contract Vault is Owned {
     using SafeTransferLib for ERC20;
@@ -15,6 +16,7 @@ contract Vault is Owned {
     //////////////////////////////////////////////////////////////*/
 
     ERC20 public immutable asset;
+    AaveMockedPool public AAVE_POOL;
 
     /*//////////////////////////////////////////////////////////////
                                STORAGE
@@ -40,8 +42,9 @@ contract Vault is Owned {
                              CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
 
-    constructor(ERC20 asset_) Owned(msg.sender) {
+    constructor(ERC20 asset_, address aavePool) Owned(msg.sender) {
         asset = asset_;
+        AAVE_POOL = AaveMockedPool(aavePool);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -52,12 +55,17 @@ contract Vault is Owned {
         // Check for rounding error since we round down in previewDeposit.
         require((shares = previewDeposit(assets, narrow)) != 0, "ZERO_SHARES");
 
+        // Cache asset
+        ERC20 asset_ = asset;
+
         // Need to transfer before minting or ERC777s could reenter.
-        asset.safeTransferFrom(msg.sender, address(this), assets);
+        asset_.safeTransferFrom(msg.sender, address(this), assets);
 
         rangeToShares[narrow] = shares;
 
-        // todo : deposit in Strategy
+        // Deposit in strategy
+        asset_.safeApprove(address(AAVE_POOL), assets);
+        AAVE_POOL.deposit(address(asset_), assets);
 
         emit Deposit(msg.sender, narrow, assets, shares);
     }
@@ -67,7 +75,8 @@ contract Vault is Owned {
 
         rangeToShares[narrow] -= shares;
 
-        // todo : withdraw from strategy
+        // Withdraw from strategy
+        AAVE_POOL.withdraw(assets);
 
         emit Withdraw(receiver, narrow, assets, shares);
 
@@ -81,7 +90,8 @@ contract Vault is Owned {
 
         rangeToShares[narrow] = 0;
 
-        // todo : withdraw from strategy
+        // Withdraw from strategy
+        AAVE_POOL.withdraw(assets);
 
         emit Withdraw(msg.sender, narrow, assets, shares);
 
@@ -92,7 +102,10 @@ contract Vault is Owned {
                             ACCOUNTING LOGIC
     //////////////////////////////////////////////////////////////*/
 
-    function totalAssets() public view returns (uint256) {}
+    function totalAssets() public view returns (uint256 assets) {
+        assets =
+            AAVE_POOL.balanceOf(address(this)).mulDivDown(asset.balanceOf(address(AAVE_POOL)), AAVE_POOL.totalSupply());
+    }
 
     function totalAssetsForRange(bool narrow) public view returns (uint256 assets) {
         if (narrow) {

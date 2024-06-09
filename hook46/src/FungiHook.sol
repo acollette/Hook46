@@ -26,7 +26,6 @@ import {SafeTransferLib} from "solmate/utils/SafeTransferLib.sol";
 
 // note : we keep vault as we might change the strategies of the Vault which makes it interesting.
 // note : We can distribute rewards easily to the multiRewardStaking
-
 contract FungiHook is BaseHook {
     // Use CurrencyLibrary and BalanceDeltaLibrary
     // to add some helper functions over the Currency and BalanceDelta
