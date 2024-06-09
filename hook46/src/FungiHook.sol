@@ -139,7 +139,7 @@ contract FungiHook is BaseHook {
 
         // Deploy ERC20 LP tokens and map it to pool
         address narrowLPToken = address(new LPToken("narrow", "nrw", 18));
-        address largeLPToken = address(new LPToken("narrow", "nrw", 18));
+        address largeLPToken = address(new LPToken("large", "lrg", 18));
         rangeInfo[poolId][true].lpToken = LPToken(narrowLPToken);
         rangeInfo[poolId][false].lpToken = LPToken(largeLPToken);
 
